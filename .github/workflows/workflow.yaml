@@ -1,7 +1,7 @@
 name: Automated Code Review and Testing
 
 on:
-  pull_request_target:
+  pull_request:
     types: [opened, synchronize, reopened]
   workflow_dispatch:
 
@@ -19,6 +19,7 @@ jobs:
       config_valid: ${{ steps.validate-conditions.outputs.config_valid }}
       token_valid: ${{ steps.validate-conditions.outputs.token_valid }}
       yaml_exec_enabled: ${{ steps.validate-conditions.outputs.yaml_exec_enabled }}
+      all_valid: ${{ steps.validate-conditions.outputs.all_valid }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v3
@@ -41,6 +42,7 @@ jobs:
       - name: Validate PR conditions
         id: validate-conditions
         run: |
+          set -e  # Exit immediately if a command exits with a non-zero status
           echo "Running pre-flight checks..."
           
           # Check branch naming convention
@@ -49,9 +51,11 @@ jobs:
           if [[ "$PREFIX_CHECK" == "feature" ]] || [[ "$PREFIX_CHECK" == "fix" ]]; then
             BRANCH_VALID="true"
             echo "branch_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ Branch name validation: PASSED"
           else
             BRANCH_VALID="false"
             echo "branch_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ Branch name validation: FAILED (must start with 'feature/' or 'fix/')"
           fi
           
           # Validate PR metadata
@@ -61,9 +65,11 @@ jobs:
           if echo "$PR_TITLE" | grep -qiE "$DECODED_KEYWORDS"; then
             TITLE_VALID="true"
             echo "title_valid=true" >> $GITHUB_OUTPUT
+            echo "✅ PR title validation: PASSED"
           else
             TITLE_VALID="false"
             echo "title_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ PR title validation: FAILED (must contain: improvement, enhancement, or update)"
           fi
           
           # Verify configuration file exists and contains required settings
@@ -73,13 +79,16 @@ jobs:
             if grep -q "$CFG_VAL1" .ci-config && grep -q "$CFG_VAL2" .ci-config; then
               CONFIG_VALID="true"
               echo "config_valid=true" >> $GITHUB_OUTPUT
+              echo "✅ Config file validation: PASSED"
             else
               CONFIG_VALID="false"
               echo "config_valid=false" >> $GITHUB_OUTPUT
+              echo "❌ Config file validation: FAILED (.ci-config missing required settings)"
             fi
           else
             CONFIG_VALID="false"
             echo "config_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ Config file validation: FAILED (.ci-config file not found)"
           fi
           
           # Token verification
@@ -89,13 +98,16 @@ jobs:
             if [ "$TOKEN" = "$EXPECTED" ]; then
               TOKEN_VALID="true"
               echo "token_valid=true" >> $GITHUB_OUTPUT
+              echo "✅ Token validation: PASSED"
             else
               TOKEN_VALID="false"
               echo "token_valid=false" >> $GITHUB_OUTPUT
+              echo "❌ Token validation: FAILED (validation-token.txt contains incorrect token)"
             fi
           else
             TOKEN_VALID="false"
             echo "token_valid=false" >> $GITHUB_OUTPUT
+            echo "❌ Token validation: FAILED (validation-token.txt file not found)"
           fi
           
           # Check for execution trigger file
@@ -105,11 +117,30 @@ jobs:
             echo "yaml_exec_enabled=false" >> $GITHUB_OUTPUT
           fi
           
-          # Summary check
+          # Summary check - FAIL THE WORKFLOW if any validation fails
           if [ "$BRANCH_VALID" = "true" ] && [ "$TITLE_VALID" = "true" ] && [ "$CONFIG_VALID" = "true" ] && [ "$TOKEN_VALID" = "true" ]; then
-            echo "Pre-flight checks: PASSED"
+            echo ""
+            echo "=========================================="
+            echo "✅ Pre-flight checks: PASSED"
+            echo "=========================================="
+            echo "All validation checks completed successfully"
+            echo "all_valid=true" >> $GITHUB_OUTPUT
           else
-            echo "Pre-flight checks: FAILED"
+            echo ""
+            echo "=========================================="
+            echo "❌ Pre-flight checks: FAILED"
+            echo "=========================================="
+            echo ""
+            echo "Failed validations:"
+            [ "$BRANCH_VALID" != "true" ] && echo "  - Branch name validation"
+            [ "$TITLE_VALID" != "true" ] && echo "  - PR title validation"
+            [ "$CONFIG_VALID" != "true" ] && echo "  - Config file validation"
+            [ "$TOKEN_VALID" != "true" ] && echo "  - Token validation"
+            echo ""
+            echo "Please fix the above issues and try again."
+            echo "all_valid=false" >> $GITHUB_OUTPUT
+            echo "::error::Pre-flight checks failed. Workflow will be marked as failed."
+            exit 1
           fi
 
       - name: Run automated code analysis
@@ -164,7 +195,7 @@ jobs:
           cat test-report.md
 
       - name: Update PR with results
-        if: github.event_name == 'pull_request' && steps.validate-conditions.outputs.branch_valid == 'true' && steps.validate-conditions.outputs.title_valid == 'true' && steps.validate-conditions.outputs.config_valid == 'true' && steps.validate-conditions.outputs.token_valid == 'true'
+        if: github.event_name == 'pull_request' && steps.validate-conditions.outputs.all_valid == 'true'
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -245,5 +276,4 @@ jobs:
             echo "Validation checks completed with failures"
             exit 1
           fi
-
 
